@@ -8,9 +8,6 @@ from telebot import types
 import yt_dlp
 
 TOKEN = os.environ.get('BOT_TOKEN')
-if not TOKEN:
-    raise ValueError("BOT_TOKEN environment variable is not set!")
-
 bot = telebot.TeleBot(TOKEN)
 
 class SimpleHealthServer(BaseHTTPRequestHandler):
@@ -80,6 +77,7 @@ def callback_download(call):
             'quiet': True,
             'no_warnings': True,
             'max_filesize': 49 * 1024 * 1024,
+            'extractor_args': {'all': {'impersonate': ['chrome']}},
         }
     else:
         ydl_opts = {
@@ -88,6 +86,7 @@ def callback_download(call):
             'quiet': True,
             'no_warnings': True,
             'max_filesize': 49 * 1024 * 1024,
+            'extractor_args': {'all': {'impersonate': ['chrome']}},
         }
         
     try:
@@ -117,7 +116,11 @@ def callback_download(call):
         
     except Exception as e:
         err_msg = str(e)
-        if "File is larger than the maximum allowed" in err_msg:
+        if "No video formats found" in err_msg:
+            bot.edit_message_text("❌ هذا المنشور عبارة عن ألبوم صور ولا يحتوي على أي مقطع فيديو.", chat_id=call.message.chat.id, message_id=status_msg.message_id)
+        elif "empty media response" in err_msg or "login" in err_msg.lower():
+            bot.edit_message_text("❌ هذا المحتوى مقيد أو الحساب خاص ويتطلب تسجيل دخول.", chat_id=call.message.chat.id, message_id=status_msg.message_id)
+        elif "File is larger than the maximum allowed" in err_msg:
             bot.edit_message_text("❌ حجم الملف أكبر من الحد المسموح به في تيليجرام (50 MB).", chat_id=call.message.chat.id, message_id=status_msg.message_id)
         else:
             bot.edit_message_text(f"❌ حدث خطأ أثناء التحميل: {err_msg[:120]}", chat_id=call.message.chat.id, message_id=status_msg.message_id)
