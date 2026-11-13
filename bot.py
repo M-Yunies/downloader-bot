@@ -7,7 +7,10 @@ import telebot
 from telebot import types
 import yt_dlp
 
-TOKEN = os.environ.get('BOT_TOKEN', '8773197267:AAFxhNdBcWwaTIYUV-p-0nlhd1wcPAmPRz0')
+TOKEN = os.environ.get('BOT_TOKEN')
+if not TOKEN:
+    raise ValueError("BOT_TOKEN environment variable is not set!")
+
 bot = telebot.TeleBot(TOKEN)
 
 class SimpleHealthServer(BaseHTTPRequestHandler):
