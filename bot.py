@@ -2,12 +2,24 @@ import os
 import re
 import glob
 import threading
+import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot import types
 import yt_dlp
+import instaloader
 
 TOKEN = os.environ.get('BOT_TOKEN')
+if not TOKEN and os.path.exists('.env'):
+    try:
+        with open('.env', 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('BOT_TOKEN='):
+                    TOKEN = line.strip().split('=', 1)[1]
+                    break
+    except Exception:
+        pass
+
 bot = telebot.TeleBot(TOKEN)
 
 class SimpleHealthServer(BaseHTTPRequestHandler):
@@ -28,6 +40,7 @@ DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 URL_REGEX = r'(https?://[^\s]+)'
+INSTA_REGEX = r'instagram\.com/(?:p|reel|reels|tv)/([^/?#&]+)'
 
 pending_requests = {}
 
@@ -35,9 +48,45 @@ pending_requests = {}
 def send_welcome(message):
     welcome_text = (
         "مرحباً بك في بوت التحميل 📥\n\n"
-        "أرسل لي أي رابط من (YouTube, TikTok, Instagram, Facebook, X, Pinterest) وسأقوم بتحميله لك مباشرة."
+        "أرسل لي أي رابط من (Instagram, TikTok, YouTube, Facebook, X, Pinterest) وسأقوم بتحميل الصور أو الفيديوهات بدقة كاملة."
     )
     bot.reply_to(message, welcome_text)
+
+def handle_instagram_post(url, chat_id):
+    match = re.search(INSTA_REGEX, url)
+    if not match:
+        return False
+    shortcode = match.group(1)
+    
+    L = instaloader.Instaloader()
+    post = instaloader.Post.from_shortcode(L.context, shortcode)
+    caption = (post.caption or "Instagram")[:1000]
+    
+    if post.typename == 'GraphSidecar':
+        nodes = list(post.get_sidecar_nodes())
+        media_group = []
+        for i, node in enumerate(nodes[:10]):
+            item_caption = caption if i == 0 else None
+            req = urllib.request.Request(node.video_url if node.is_video else node.display_url, headers={'User-Agent': 'Mozilla/5.0'})
+            data = urllib.request.urlopen(req).read()
+            if node.is_video:
+                media_group.append(types.InputMediaVideo(data, caption=item_caption))
+            else:
+                media_group.append(types.InputMediaPhoto(data, caption=item_caption))
+        if media_group:
+            bot.send_media_group(chat_id, media_group)
+            return True
+
+    if post.is_video:
+        req = urllib.request.Request(post.video_url, headers={'User-Agent': 'Mozilla/5.0'})
+        data = urllib.request.urlopen(req).read()
+        bot.send_video(chat_id, data, caption=caption, supports_streaming=True)
+        return True
+
+    req = urllib.request.Request(post.url, headers={'User-Agent': 'Mozilla/5.0'})
+    data = urllib.request.urlopen(req).read()
+    bot.send_photo(chat_id, data, caption=caption)
+    return True
 
 @bot.message_handler(func=lambda msg: re.search(URL_REGEX, msg.text or ""))
 def handle_url_message(message):
@@ -47,14 +96,19 @@ def handle_url_message(message):
     url = urls[0]
     
     markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_video = types.InlineKeyboardButton("🎬 فيديو", callback_data=f"vid_{message.message_id}")
-    btn_audio = types.InlineKeyboardButton("🎵 صوت", callback_data=f"aud_{message.message_id}")
-    markup.add(btn_video, btn_audio)
+    if 'instagram.com' in url:
+        btn_auto = types.InlineKeyboardButton("📥 تحميل المنشور (صور / فيديو)", callback_data=f"ins_{message.message_id}")
+        btn_audio = types.InlineKeyboardButton("🎵 صوت فقط", callback_data=f"aud_{message.message_id}")
+        markup.add(btn_auto, btn_audio)
+    else:
+        btn_video = types.InlineKeyboardButton("🎬 فيديو", callback_data=f"vid_{message.message_id}")
+        btn_audio = types.InlineKeyboardButton("🎵 صوت", callback_data=f"aud_{message.message_id}")
+        markup.add(btn_video, btn_audio)
     
     pending_requests[message.message_id] = url
     bot.reply_to(message, "اختر نوع التحميل المطلوب:", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith(('vid_', 'aud_')))
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('vid_', 'aud_', 'ins_')))
 def callback_download(call):
     mode, msg_id_str = call.data.split('_')
     msg_id = int(msg_id_str)
@@ -65,14 +119,26 @@ def callback_download(call):
         return
     
     bot.answer_callback_query(call.id)
-    status_msg = bot.edit_message_text("⏳ جاري التحميل والمعالجة...", chat_id=call.message.chat.id, message_id=call.message.message_id)
+    status_msg = bot.edit_message_text("⏳ جاري التحميل والمعالجة بأعلى دقة...", chat_id=call.message.chat.id, message_id=call.message.message_id)
     
+    if mode == 'ins' or ('instagram.com' in url and mode == 'vid'):
+        try:
+            if handle_instagram_post(url, call.message.chat.id):
+                bot.delete_message(chat_id=call.message.chat.id, message_id=status_msg.message_id)
+                pending_requests.pop(msg_id, None)
+                return
+        except Exception as e:
+            if mode == 'ins':
+                bot.edit_message_text(f"❌ تعذر استخراج صور إنستغرام: {str(e)[:100]}", chat_id=call.message.chat.id, message_id=status_msg.message_id)
+                pending_requests.pop(msg_id, None)
+                return
+            
     prefix = f"{call.from_user.id}_{msg_id}"
     out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}_%(id)s.%(ext)s")
     
-    if mode == 'vid':
+    if mode == 'aud':
         ydl_opts = {
-            'format': 'best[filesize<48M]/best[ext=mp4]/best',
+            'format': 'bestaudio/best',
             'outtmpl': out_template,
             'quiet': True,
             'no_warnings': True,
@@ -81,7 +147,7 @@ def callback_download(call):
         }
     else:
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': 'best[filesize<48M]/best[ext=mp4]/best',
             'outtmpl': out_template,
             'quiet': True,
             'no_warnings': True,
