@@ -29,17 +29,17 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 URL_REGEX = r'(https?://[^\s]+)'
 INSTA_REGEX = r'instagram\.com/(?:p|reel|reels|tv)/([^/?#&]+)'
 
-pending_requests = {}
+media_links = {}
 
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     welcome_text = (
-        "مرحباً بك في بوت التحميل 📥\n\n"
-        "أرسل لي أي رابط من (Instagram, TikTok, YouTube, Facebook, X, Pinterest) وسأقوم بتحميل الصور أو الفيديوهات بدقة كاملة."
+        "مرحباً بك في بوت التحميل المباشر 📥\n\n"
+        "أرسل لي أي رابط من (Instagram, TikTok, YouTube, Facebook, X, Pinterest) وسأقوم بتحميل الصور أو الفيديوهات فوراً بأعلى دقة دون أي أسئلة أو خطوات إضافية."
     )
     bot.reply_to(message, welcome_text)
 
-def handle_instagram_post(url, chat_id):
+def process_instagram(url, chat_id):
     match = re.search(INSTA_REGEX, url)
     if not match:
         return False
@@ -67,7 +67,11 @@ def handle_instagram_post(url, chat_id):
     if post.is_video:
         req = urllib.request.Request(post.video_url, headers={'User-Agent': 'Mozilla/5.0'})
         data = urllib.request.urlopen(req).read()
-        bot.send_video(chat_id, data, caption=caption, supports_streaming=True)
+        markup = types.InlineKeyboardMarkup()
+        cb_key = f"aud_{chat_id}_{shortcode}"
+        media_links[cb_key] = url
+        markup.add(types.InlineKeyboardButton("🎵 استخراج الصوت", callback_data=cb_key))
+        bot.send_video(chat_id, data, caption=caption, supports_streaming=True, reply_markup=markup)
         return True
 
     req = urllib.request.Request(post.url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -75,52 +79,8 @@ def handle_instagram_post(url, chat_id):
     bot.send_photo(chat_id, data, caption=caption)
     return True
 
-@bot.message_handler(func=lambda msg: re.search(URL_REGEX, msg.text or ""))
-def handle_url_message(message):
-    urls = re.findall(URL_REGEX, message.text)
-    if not urls:
-        return
-    url = urls[0]
-    
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    if 'instagram.com' in url:
-        btn_auto = types.InlineKeyboardButton("📥 تحميل المنشور (صور / فيديو)", callback_data=f"ins_{message.message_id}")
-        btn_audio = types.InlineKeyboardButton("🎵 صوت فقط", callback_data=f"aud_{message.message_id}")
-        markup.add(btn_auto, btn_audio)
-    else:
-        btn_video = types.InlineKeyboardButton("🎬 فيديو", callback_data=f"vid_{message.message_id}")
-        btn_audio = types.InlineKeyboardButton("🎵 صوت", callback_data=f"aud_{message.message_id}")
-        markup.add(btn_video, btn_audio)
-    
-    pending_requests[message.message_id] = url
-    bot.reply_to(message, "اختر نوع التحميل المطلوب:", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith(('vid_', 'aud_', 'ins_')))
-def callback_download(call):
-    mode, msg_id_str = call.data.split('_')
-    msg_id = int(msg_id_str)
-    
-    url = pending_requests.get(msg_id)
-    if not url:
-        bot.answer_callback_query(call.id, "انتهت صلاحية الطلب، أرسل الرابط مجدداً.")
-        return
-    
-    bot.answer_callback_query(call.id)
-    status_msg = bot.edit_message_text("⏳ جاري التحميل والمعالجة بأعلى دقة...", chat_id=call.message.chat.id, message_id=call.message.message_id)
-    
-    if mode == 'ins' or ('instagram.com' in url and mode == 'vid'):
-        try:
-            if handle_instagram_post(url, call.message.chat.id):
-                bot.delete_message(chat_id=call.message.chat.id, message_id=status_msg.message_id)
-                pending_requests.pop(msg_id, None)
-                return
-        except Exception as e:
-            if mode == 'ins':
-                bot.edit_message_text(f"❌ تعذر استخراج صور إنستغرام: {str(e)[:100]}", chat_id=call.message.chat.id, message_id=status_msg.message_id)
-                pending_requests.pop(msg_id, None)
-                return
-            
-    prefix = f"{call.from_user.id}_{msg_id}"
+def process_video_download(url, chat_id, status_msg, mode='vid'):
+    prefix = f"{chat_id}_{int(threading.get_ident())}"
     out_template = os.path.join(DOWNLOAD_DIR, f"{prefix}_%(id)s.%(ext)s")
     
     if mode == 'aud':
@@ -149,42 +109,71 @@ def callback_download(call):
             
         matched_files = glob.glob(os.path.join(DOWNLOAD_DIR, f"{prefix}_*"))
         if not matched_files:
-            bot.edit_message_text("❌ لم يتم العثور على ملف بعد التحميل.", chat_id=call.message.chat.id, message_id=status_msg.message_id)
+            bot.edit_message_text("❌ تعذر العثور على الملف بعد التحميل.", chat_id=chat_id, message_id=status_msg.message_id)
             return
             
         downloaded_file = matched_files[0]
         ext = os.path.splitext(downloaded_file)[1].lower()
         
-        bot.edit_message_text("📤 جاري الرفع إلى تيليجرام...", chat_id=call.message.chat.id, message_id=status_msg.message_id)
-        
         with open(downloaded_file, 'rb') as f:
             if ext in ['.jpg', '.jpeg', '.png', '.webp']:
-                bot.send_photo(call.message.chat.id, f, caption=title)
+                bot.send_photo(chat_id, f, caption=title)
             elif mode == 'aud' or ext in ['.mp3', '.m4a', '.wav', '.ogg', '.opus', '.aac']:
-                bot.send_audio(call.message.chat.id, f, caption=title)
+                bot.send_audio(chat_id, f, caption=title)
             else:
-                bot.send_video(call.message.chat.id, f, caption=title, supports_streaming=True)
+                markup = types.InlineKeyboardMarkup()
+                cb_key = f"aud_{chat_id}_{status_msg.message_id}"
+                media_links[cb_key] = url
+                markup.add(types.InlineKeyboardButton("🎵 استخراج الصوت", callback_data=cb_key))
+                bot.send_video(chat_id, f, caption=title, supports_streaming=True, reply_markup=markup)
                 
-        bot.delete_message(chat_id=call.message.chat.id, message_id=status_msg.message_id)
+        bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
         
     except Exception as e:
         err_msg = str(e)
         if "No video formats found" in err_msg:
-            bot.edit_message_text("❌ هذا المنشور عبارة عن ألبوم صور ولا يحتوي على أي مقطع فيديو.", chat_id=call.message.chat.id, message_id=status_msg.message_id)
+            bot.edit_message_text("❌ هذا المنشور عبارة عن ألبوم صور ولا يحتوي على أي مقطع فيديو.", chat_id=chat_id, message_id=status_msg.message_id)
         elif "empty media response" in err_msg or "login" in err_msg.lower():
-            bot.edit_message_text("❌ هذا المحتوى مقيد أو الحساب خاص ويتطلب تسجيل دخول.", chat_id=call.message.chat.id, message_id=status_msg.message_id)
+            bot.edit_message_text("❌ هذا المحتوى مقيد أو الحساب خاص ويتطلب تسجيل دخول.", chat_id=chat_id, message_id=status_msg.message_id)
         elif "File is larger than the maximum allowed" in err_msg:
-            bot.edit_message_text("❌ حجم الملف أكبر من الحد المسموح به في تيليجرام (50 MB).", chat_id=call.message.chat.id, message_id=status_msg.message_id)
+            bot.edit_message_text("❌ حجم الملف أكبر من الحد المسموح به في تيليجرام (50 MB).", chat_id=chat_id, message_id=status_msg.message_id)
         else:
-            bot.edit_message_text(f"❌ حدث خطأ أثناء التحميل: {err_msg[:120]}", chat_id=call.message.chat.id, message_id=status_msg.message_id)
-            
+            bot.edit_message_text(f"❌ حدث خطأ أثناء التحميل: {err_msg[:120]}", chat_id=chat_id, message_id=status_msg.message_id)
     finally:
         for f in glob.glob(os.path.join(DOWNLOAD_DIR, f"{prefix}_*")):
             try:
                 os.remove(f)
             except Exception:
                 pass
-        pending_requests.pop(msg_id, None)
+
+@bot.message_handler(func=lambda msg: re.search(URL_REGEX, msg.text or ""))
+def handle_url_message(message):
+    urls = re.findall(URL_REGEX, message.text)
+    if not urls:
+        return
+    url = urls[0]
+    
+    status_msg = bot.reply_to(message, "⏳ جاري الفحص والتحميل المباشر بأعلى دقة...")
+    
+    if 'instagram.com' in url:
+        try:
+            if process_instagram(url, message.chat.id):
+                bot.delete_message(chat_id=message.chat.id, message_id=status_msg.message_id)
+                return
+        except Exception:
+            pass
+            
+    process_video_download(url, message.chat.id, status_msg, mode='vid')
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('aud_'))
+def callback_extract_audio(call):
+    url = media_links.get(call.data)
+    if not url:
+        bot.answer_callback_query(call.id, "انتهت صلاحية الطلب.")
+        return
+    bot.answer_callback_query(call.id)
+    status_msg = bot.send_message(call.message.chat.id, "⏳ جاري استخراج الصوت...")
+    process_video_download(url, call.message.chat.id, status_msg, mode='aud')
 
 class WebhookServer(BaseHTTPRequestHandler):
     def do_GET(self):
