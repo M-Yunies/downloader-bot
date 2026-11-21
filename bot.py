@@ -2,6 +2,7 @@ import os
 import re
 import glob
 import threading
+import json
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
@@ -21,20 +22,6 @@ if not TOKEN and os.path.exists('.env'):
         pass
 
 bot = telebot.TeleBot(TOKEN)
-
-class SimpleHealthServer(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Telegram Downloader Bot is running!")
-
-    def log_message(self, format, *args):
-        pass
-
-def start_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), SimpleHealthServer)
-    server.serve_forever()
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -199,7 +186,48 @@ def callback_download(call):
                 pass
         pending_requests.pop(msg_id, None)
 
+class WebhookServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Telegram Downloader Bot is running!")
+
+    def do_POST(self):
+        if self.path.strip('/') == TOKEN:
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            json_string = post_data.decode('utf-8')
+            update = types.Update.de_json(json_string)
+            if update:
+                threading.Thread(target=bot.process_new_updates, args=([update],)).start()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
+
 if __name__ == '__main__':
-    print("Bot is running...")
-    threading.Thread(target=start_health_server, daemon=True).start()
-    bot.infinity_polling(skip_pending=True)
+    render_url = os.environ.get('RENDER_EXTERNAL_URL')
+    port = int(os.environ.get("PORT", 8080))
+
+    if render_url:
+        webhook_target = f"{render_url.rstrip('/')}/{TOKEN}"
+        print(f"Setting webhook to: {webhook_target}")
+        try:
+            bot.remove_webhook()
+            bot.set_webhook(url=webhook_target)
+        except Exception as e:
+            print(f"Webhook setup error: {e}")
+            
+        server = HTTPServer(("0.0.0.0", port), WebhookServer)
+        print(f"Webhook server running on port {port}...")
+        server.serve_forever()
+    else:
+        print("Running in polling mode locally...")
+        server = HTTPServer(("0.0.0.0", port), WebhookServer)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        bot.infinity_polling(skip_pending=True)
