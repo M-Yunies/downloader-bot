@@ -4,6 +4,7 @@ import glob
 import threading
 import json
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import telebot
 from telebot import types
@@ -37,6 +38,16 @@ def send_welcome(message):
         "أرسل لي أي رابط من (Instagram, TikTok, YouTube, Facebook, X, Pinterest) وسأقوم بتحميل الصور أو الفيديوهات فوراً بأعلى دقة دون أي أسئلة أو خطوات إضافية."
     )
     bot.reply_to(message, welcome_text)
+
+def _download_single_media(item):
+    m_type, m_url = item
+    try:
+        req = urllib.request.Request(m_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+        data = urllib.request.urlopen(req, timeout=25).read()
+        return (m_type, data)
+    except Exception as e:
+        print(f"Download item error: {e}")
+        return None
 
 def process_instagram(url, chat_id, status_msg):
     ydl_opts = {
@@ -85,34 +96,28 @@ def process_instagram(url, chat_id, status_msg):
         if len(media_items) == 1 and media_items[0][0] == 'video':
             process_video_download(url, chat_id, status_msg, mode='vid')
             return True
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            downloaded = list(executor.map(_download_single_media, media_items))
             
-        if len(media_items) == 1 and media_items[0][0] == 'photo':
-            req = urllib.request.Request(media_items[0][1], headers={'User-Agent': 'Mozilla/5.0'})
-            data = urllib.request.urlopen(req, timeout=30).read()
-            bot.send_photo(chat_id, data, caption=caption or None)
-            try:
-                bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
-            except Exception:
-                pass
+        valid_items = [d for d in downloaded if d is not None]
+        if not valid_items:
+            bot.edit_message_text("❌ تعذر تنزيل ملفات هذا المنشور.", chat_id=chat_id, message_id=status_msg.message_id)
             return True
 
         chunk_size = 10
-        for i in range(0, len(media_items), chunk_size):
-            chunk = media_items[i:i + chunk_size]
+        for i in range(0, len(valid_items), chunk_size):
+            chunk = valid_items[i:i + chunk_size]
             if len(chunk) == 1:
-                m_type, m_url = chunk[0]
-                req = urllib.request.Request(m_url, headers={'User-Agent': 'Mozilla/5.0'})
-                data = urllib.request.urlopen(req, timeout=30).read()
+                m_type, data = chunk[0]
                 if m_type == 'video':
                     bot.send_video(chat_id, data, caption=caption if i == 0 else None)
                 else:
                     bot.send_photo(chat_id, data, caption=caption if i == 0 else None)
             else:
                 group = []
-                for j, (m_type, m_url) in enumerate(chunk):
+                for j, (m_type, data) in enumerate(chunk):
                     item_cap = caption if (i == 0 and j == 0) else None
-                    req = urllib.request.Request(m_url, headers={'User-Agent': 'Mozilla/5.0'})
-                    data = urllib.request.urlopen(req, timeout=30).read()
                     if m_type == 'video':
                         group.append(types.InputMediaVideo(data, caption=item_cap))
                     else:
@@ -210,10 +215,13 @@ def handle_url_message(message):
             if process_instagram(url, message.chat.id, status_msg):
                 return
         except Exception as e:
+            print(f"Instagram processing error: {e}")
             err_str = str(e)
-            if "login" in err_str.lower() or "checkpoint" in err_str.lower():
+            if "login" in err_str.lower() or "checkpoint" in err_str.lower() or "private" in err_str.lower():
                 bot.edit_message_text("❌ هذا الحساب خاص أو المنشور مقيد ويتطلب تسجيل دخول.", chat_id=message.chat.id, message_id=status_msg.message_id)
-                return
+            else:
+                bot.edit_message_text(f"❌ تعذر استخراج وسائط المنشور: {err_str[:100]}", chat_id=message.chat.id, message_id=status_msg.message_id)
+            return
             
     process_video_download(url, message.chat.id, status_msg, mode='vid')
 
